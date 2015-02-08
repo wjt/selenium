@@ -14,8 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import platform
+import re
 import signal
 import subprocess
+import threading
 import time
 
 from selenium.common.exceptions import WebDriverException
@@ -40,8 +42,6 @@ class Service(object):
         self.port = port
         self.path = executable_path
         self.service_args= service_args
-        if self.port == 0:
-            self.port = utils.free_port()
         if self.service_args is None:
             self.service_args = []
         else:
@@ -58,6 +58,20 @@ class Service(object):
         # we have to try to stop the launched process.
         self.stop()
 
+    def _output_reader_thread(self, fh):
+        pattern = re.compile(r'GhostDriver - Main - running on port (\d+)')
+        line = fh.readline()
+        while line:
+            if self.port == 0:
+                m = pattern.search(line)
+                if m is not None:
+                    self.port = int(m.group(1))
+
+            self._log.write(line)
+            self._log.flush()
+
+            line = fh.readline()
+
     def start(self):
         """
         Starts PhantomJS with GhostDriver.
@@ -69,7 +83,14 @@ class Service(object):
         try:
             self.process = subprocess.Popen(self.service_args, stdin=subprocess.PIPE,
                                             close_fds=platform.system() != 'Windows',
-                                            stdout=self._log, stderr=self._log)
+                                            stdout=(self._log if self.port != 0 else subprocess.PIPE),
+                                            stderr=subprocess.STDOUT)
+
+            if self.port == 0:
+                stdout_thread = threading.Thread(target=self._output_reader_thread,
+                                                 args=(self.process.stdout,))
+                stdout_thread.setDaemon(True)
+                stdout_thread.start()
 
         except Exception as e:
             raise WebDriverException("Unable to start phantomjs with ghostdriver.", e)
@@ -78,7 +99,7 @@ class Service(object):
             count += 1
             time.sleep(1)
             if count == 30:
-                 raise WebDriverException("Can not connect to GhostDriver")
+                 raise WebDriverException("Can not connect to GhostDriver on port {}".format(self.port))
 
     @property
     def service_url(self):
